@@ -1,0 +1,1019 @@
+diff --git a/src/d3d10/meson.build b/src/d3d10/meson.build
+index 6a690c4..6a59d7f 100644
+--- a/src/d3d10/meson.build
++++ b/src/d3d10/meson.build
+@@ -10,7 +10,10 @@ d3d10_core_link_depends = []
+ if platform == 'windows'
+   d3d10_d3d11_dep = lib_d3d11
+ else
+-  d3d10_core_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d10core.sym') ]
++  # ld64 does not support --version-script (GNU ld only); skip on Darwin
++  if host_machine.system() != 'darwin'
++    d3d10_core_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d10core.sym') ]
++  endif
+   d3d10_core_link_depends += files('d3d10core.sym')
+   d3d10_d3d11_dep = d3d11_dep
+ endif
+diff --git a/src/d3d11/meson.build b/src/d3d11/meson.build
+index af2b7b2..c44ba5f 100644
+--- a/src/d3d11/meson.build
++++ b/src/d3d11/meson.build
+@@ -74,7 +74,10 @@ d3d11_link_depends = []
+ if platform == 'windows'
+   d3d11_dxgi_deps = [ lib_gdi32, lib_dxgi ]
+ else
+-  d3d11_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d11.sym') ]
++  # ld64 does not support --version-script (GNU ld only); skip on Darwin
++  if host_machine.system() != 'darwin'
++    d3d11_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d11.sym') ]
++  endif
+   d3d11_link_depends += files('d3d11.sym')
+   d3d11_dxgi_deps = [ dxgi_dep ]
+ endif
+diff --git a/src/d3d8/meson.build b/src/d3d8/meson.build
+index 19064da..ffd3f27 100644
+--- a/src/d3d8/meson.build
++++ b/src/d3d8/meson.build
+@@ -19,7 +19,10 @@ d3d8_link_depends = []
+ 
+ if platform != 'windows'
+   lib_d3d9 = d3d9_dep
+-  d3d8_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d8.sym') ]
++  # ld64 does not support --version-script (GNU ld only); skip on Darwin
++  if host_machine.system() != 'darwin'
++    d3d8_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d8.sym') ]
++  endif
+   d3d8_link_depends += files('d3d8.sym')
+ endif
+ 
+diff --git a/src/d3d9/d3d9_common_buffer.cpp b/src/d3d9/d3d9_common_buffer.cpp
+index 36690eb..83efa32 100644
+--- a/src/d3d9/d3d9_common_buffer.cpp
++++ b/src/d3d9/d3d9_common_buffer.cpp
+@@ -23,6 +23,19 @@ namespace dxvk {
+   }
+ 
+   D3D9CommonBuffer::~D3D9CommonBuffer() {
++    static const bool waitIdleOnDestroy = [] {
++      bool enabled = env::getEnvVar("DXVK_MVK_WAIT_IDLE_ON_RESOURCE_DESTROY") == "1";
++      if (enabled)
++        Logger::info("DXVK_MVK_WAIT_IDLE_ON_RESOURCE_DESTROY: synchronizing buffer destruction");
++      return enabled;
++    }();
++
++    if (unlikely(waitIdleOnDestroy && m_buffer != nullptr)) {
++      m_parent->Flush();
++      m_parent->SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
++      m_parent->GetDXVKDevice()->waitForIdle();
++    }
++
+     if (m_desc.Pool == D3DPOOL_DEFAULT)
+       m_parent->DecrementLosableCounter();
+   }
+@@ -173,4 +186,4 @@ namespace dxvk {
+     return m_parent->GetDXVKDevice()->createBuffer(info, memoryFlags);
+   }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/d3d9/d3d9_common_texture.cpp b/src/d3d9/d3d9_common_texture.cpp
+index 9d5fe38..a10c47f 100644
+--- a/src/d3d9/d3d9_common_texture.cpp
++++ b/src/d3d9/d3d9_common_texture.cpp
+@@ -102,6 +102,24 @@ namespace dxvk {
+ 
+ 
+   D3D9CommonTexture::~D3D9CommonTexture() {
++    /* MoltenVK may still reference a D3D9 image after the guest destroys a
++     * rapidly replaced DWM surface.  On macOS this showed up as an immediate
++     * VK_ERROR_DEVICE_LOST while dragging or maximizing windows.  Keep this
++     * opt-in and deliberately conservative while identifying the exact
++     * retirement primitive that needs stronger ordering. */
++    static const bool waitIdleOnDestroy = [] {
++      bool enabled = env::getEnvVar("DXVK_MVK_WAIT_IDLE_ON_RESOURCE_DESTROY") == "1";
++      if (enabled)
++        Logger::info("DXVK_MVK_WAIT_IDLE_ON_RESOURCE_DESTROY: synchronizing texture destruction");
++      return enabled;
++    }();
++
++    if (unlikely(waitIdleOnDestroy && m_image != nullptr)) {
++      m_device->Flush();
++      m_device->SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
++      m_device->GetDXVKDevice()->waitForIdle();
++    }
++
+     if (m_size != 0)
+       m_device->ChangeReportedMemory(m_size);
+ 
+diff --git a/src/d3d9/d3d9_main.cpp b/src/d3d9/d3d9_main.cpp
+index 3fe778a..e06486d 100644
+--- a/src/d3d9/d3d9_main.cpp
++++ b/src/d3d9/d3d9_main.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include "d3d9_annotation.h"
+ 
++#include <cstdio>
++
+ class D3DFE_PROCESSVERTICES;
+ using PSGPERRORID = UINT;
+ 
+@@ -30,7 +32,14 @@ extern "C" {
+ 
+   DLLEXPORT IDirect3D9* __stdcall Direct3DCreate9(UINT nSDKVersion) {
+     IDirect3D9Ex* pDirect3D = nullptr;
+-    dxvk::CreateD3D9(false, &pDirect3D, nullptr, 0);
++    try {
++      dxvk::CreateD3D9(false, &pDirect3D, nullptr, 0);
++    } catch (const dxvk::DxvkError& e) {
++      // QEMU hosts this entry point through a C ABI. Never let a C++
++      // exception escape across it and terminate the emulator.
++      std::fprintf(stderr, "DXVK Direct3DCreate9: %s\n", e.message().c_str());
++      return nullptr;
++    }
+ 
+     return pDirect3D;
+   }
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 53d23a6..defc51a 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -56,7 +56,10 @@ d3d9_ld_args      = []
+ d3d9_link_depends = []
+ 
+ if platform != 'windows'
+-  d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
++  # ld64 does not support --version-script (GNU ld only); skip on Darwin
++  if host_machine.system() != 'darwin'
++    d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
++  endif
+   d3d9_link_depends += files('d3d9.sym')
+ endif
+ 
+diff --git a/src/dxgi/meson.build b/src/dxgi/meson.build
+index a9ed5e7..babc2c0 100644
+--- a/src/dxgi/meson.build
++++ b/src/dxgi/meson.build
+@@ -20,7 +20,10 @@ dxgi_extra_dep    = []
+ if platform == 'windows'
+   dxgi_extra_dep    += [ cpp.find_library('version') ]
+ else
+-  dxgi_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'dxgi.sym') ]
++  # ld64 does not support --version-script (GNU ld only); skip on Darwin
++  if host_machine.system() != 'darwin'
++    dxgi_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'dxgi.sym') ]
++  endif
+   dxgi_link_depends += files('dxgi.sym')
+ endif
+ 
+diff --git a/src/dxvk/dxvk_bind_mask.h b/src/dxvk/dxvk_bind_mask.h
+index e85fa07..f7da137 100644
+--- a/src/dxvk/dxvk_bind_mask.h
++++ b/src/dxvk/dxvk_bind_mask.h
+@@ -144,7 +144,7 @@ namespace dxvk {
+       if (!mask)
+         return -1;
+       
+-      return BitCount * intId + bit::tzcnt(mask);
++      return BitCount * intId + bit::tzcnt(uint64_t(mask));
+     }
+ 
+     bool operator == (const DxvkBindingSet& other) const {
+diff --git a/src/dxvk/dxvk_cmdlist.cpp b/src/dxvk/dxvk_cmdlist.cpp
+index 108ce64..373087f 100644
+--- a/src/dxvk/dxvk_cmdlist.cpp
++++ b/src/dxvk/dxvk_cmdlist.cpp
+@@ -60,7 +60,8 @@ namespace dxvk {
+   VkResult DxvkCommandSubmission::submit(
+           DxvkDevice*           device,
+           VkQueue               queue,
+-          uint64_t              frameId) {
++          uint64_t              frameId,
++          VkFence               fence) {
+     auto vk = device->vkd();
+ 
+     VkLatencySubmissionPresentIdNV latencyInfo = { VK_STRUCTURE_TYPE_LATENCY_SUBMISSION_PRESENT_ID_NV };
+@@ -88,8 +89,8 @@ namespace dxvk {
+ 
+     VkResult vr = VK_SUCCESS;
+ 
+-    if (!this->isEmpty())
+-      vr = vk->vkQueueSubmit2(queue, 1, &submitInfo, VK_NULL_HANDLE);
++    if (!this->isEmpty() || fence)
++      vr = vk->vkQueueSubmit2(queue, 1, &submitInfo, fence);
+ 
+     this->reset();
+     return vr;
+@@ -249,6 +250,24 @@ namespace dxvk {
+   
+   DxvkCommandList::~DxvkCommandList() {
+     this->reset();
++
++    if (m_completionFence)
++      m_vkd->vkDestroyFence(m_vkd->device(), m_completionFence, nullptr);
++  }
++
++
++  VkResult DxvkCommandList::waitCompletionFence() {
++    if (!m_completionFencePending)
++      return VK_SUCCESS;
++
++    VkResult vr = m_vkd->vkWaitForFences(m_vkd->device(), 1, &m_completionFence, VK_TRUE, ~0ull);
++
++    if (vr == VK_SUCCESS) {
++      m_vkd->vkResetFences(m_vkd->device(), 1, &m_completionFence);
++      m_completionFencePending = false;
++    }
++
++    return vr;
+   }
+   
+   
+@@ -272,6 +291,42 @@ namespace dxvk {
+ 
+     m_commandSubmission.reset();
+ 
++    // DXVK_MVK_COMPLETION_FENCE=1: MoltenVK signals DXVK's timeline semaphore
++    // from inside the MTLCommandBuffer (encodeSignalEvent), so the value can
++    // be reached before Metal considers the command buffer complete.  With
++    // residency sets MoltenVK no longer retains the resources a command
++    // buffer uses, so anything DXVK destroys in that window (chunks, images,
++    // dedicated buffers) makes Metal fail the command buffer with
++    // kIOGPUCommandBufferCallbackErrorInvalidResource.  MoltenVK signals
++    // VkFences from the MTLCommandBuffer completed handler instead, so attach
++    // one to the final graphics submission and have the finish thread wait
++    // for it before any tracked object is released.
++    static const bool useCompletionFence = [] {
++      bool enabled = env::getEnvVar("DXVK_MVK_COMPLETION_FENCE") == "1";
++
++      if (enabled)
++        Logger::info("DXVK_MVK_COMPLETION_FENCE: waiting for Metal command buffer completion");
++
++      return enabled;
++    } ();
++    VkFence completionFence = VK_NULL_HANDLE;
++
++    if (useCompletionFence) {
++      if (!m_completionFence) {
++        VkFenceCreateInfo fenceInfo = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
++
++        if (m_vkd->vkCreateFence(m_vkd->device(), &fenceInfo, nullptr, &m_completionFence))
++          m_completionFence = VK_NULL_HANDLE;
++      }
++
++      // Never resubmit a fence that was not waited for and reset
++      if (m_completionFencePending)
++        waitCompletionFence();
++
++      if (!m_completionFencePending)
++        completionFence = m_completionFence;
++    }
++
+     for (size_t i = 0; i < m_cmdSubmissions.size(); i++) {
+       bool isFirst = i == 0;
+       bool isLast  = i == m_cmdSubmissions.size() - 1;
+@@ -358,19 +413,28 @@ namespace dxvk {
+       m_commandSubmission.signalSemaphore(semaphores.graphics,
+         ++timelines.graphics, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+ 
++      bool extraWsiSubmit = (m_wsiSemaphores.present || m_wsiSemaphores.acquire) && isLast;
++      VkFence mainFence = (isLast && !extraWsiSubmit) ? completionFence : VK_NULL_HANDLE;
++
+       // Finally, submit all graphics commands of the current submission
+-      if ((status = m_commandSubmission.submit(m_device, graphics.queueHandle, trackedId)))
++      if ((status = m_commandSubmission.submit(m_device, graphics.queueHandle, trackedId, mainFence)))
+         return status;
+ 
++      if (mainFence)
++        m_completionFencePending = true;
++
+       // If there are WSI semaphores involved, do another submit only
+       // containing a timeline semaphore signal so that we can be sure
+       // that they are safe to use afterwards.
+-      if ((m_wsiSemaphores.present || m_wsiSemaphores.acquire) && isLast) {
++      if (extraWsiSubmit) {
+         m_commandSubmission.signalSemaphore(semaphores.graphics,
+           ++timelines.graphics, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+ 
+-        if ((status = m_commandSubmission.submit(m_device, graphics.queueHandle, trackedId)))
++        if ((status = m_commandSubmission.submit(m_device, graphics.queueHandle, trackedId, completionFence)))
+           return status;
++
++        if (completionFence)
++          m_completionFencePending = true;
+       }
+ 
+       // Finally, submit semaphore wait on the transfer queue. If this
+diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
+index 38891eb..fbb9983 100644
+--- a/src/dxvk/dxvk_cmdlist.h
++++ b/src/dxvk/dxvk_cmdlist.h
+@@ -133,7 +133,8 @@ namespace dxvk {
+     VkResult submit(
+             DxvkDevice*           device,
+             VkQueue               queue,
+-            uint64_t              frameId);
++            uint64_t              frameId,
++            VkFence               fence = VK_NULL_HANDLE);
+ 
+     /**
+      * \brief Resets object
+@@ -391,6 +392,14 @@ namespace dxvk {
+     /**
+      * \brief Notifies resources and signals
+      */
++    /**
++     * \brief Waits for true command buffer completion
++     *
++     * No-op unless DXVK_MVK_COMPLETION_FENCE=1, see submit().
++     * \returns Wait status
++     */
++    VkResult waitCompletionFence();
++
+     void notifyObjects() {
+       m_objectTracker.clear();
+       m_signalTracker.notify();
+@@ -1375,6 +1384,9 @@ namespace dxvk {
+ 
+     DxvkCommandSubmission     m_commandSubmission;
+ 
++    VkFence                   m_completionFence = VK_NULL_HANDLE;
++    bool                      m_completionFencePending = false;
++
+     small_vector<DxvkFenceValuePair, 4> m_waitSemaphores;
+     small_vector<DxvkFenceValuePair, 4> m_signalSemaphores;
+ 
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 7220b7b..cb21bc3 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -9,6 +9,54 @@
+ #include "dxvk_context.h"
+ 
+ namespace dxvk {
++
++  // Opt-in MoltenVK/Apple-TBDR experiments, default off.  Apple GPUs are
++  // tile-based: a Metal DontCare load or store genuinely discards tile
++  // memory, where desktop GPUs usually leave the old contents in place.
++  // MoltenVK ignores Vulkan image layouts, so keeping LOAD/STORE preserves
++  // real memory.  D3D9 always preserves render-target contents unless they
++  // are cleared, so both are semantically safe; the only cost is bandwidth.
++  static bool vmvgaForceColorLoad() {
++    static const bool v = env::getEnvVar("DXVK_FORCE_COLOR_LOAD") == "1";
++    return v;
++  }
++
++  // DXVK_FORCE_DEPTH_LOAD=1: the depth/stencil counterpart.  DWM composes
++  // with a depth buffer it clears only occasionally and expects to persist
++  // between frames; on Apple's TBDR a DONT_CARE depth load/store really
++  // drops it, so depth tests pass or fail at random and window frames /
++  // glass are drawn partially (varies run to run).
++  static bool vmvgaForceDepthLoad() {
++    static const bool v = [] {
++      bool enabled = env::getEnvVar("DXVK_FORCE_DEPTH_LOAD") == "1";
++      if (enabled)
++        Logger::info("DXVK_FORCE_DEPTH_LOAD: depth/stencil contents always preserved");
++      return enabled;
++    } ();
++    return v;
++  }
++
++  static bool vmvgaNoColorStoreDiscard() {
++    static const bool v = env::getEnvVar("DXVK_NO_COLOR_STORE_DISCARD") == "1";
++    return v;
++  }
++
++  // MoltenVK maps dynamic rendering to Metal tile render passes.  Restricting
++  // the Vulkan render area to DXVK's tracked draw bounds is normally a useful
++  // optimization, but DWM incrementally composes into alternating full-screen
++  // D3D9 targets and depends on every untouched tile retaining its previous
++  // contents.  Keep the full framebuffer render area as a narrow opt-in
++  // compatibility path; LOAD/STORE still controls preservation and clears.
++  static bool vmvgaForceFullRenderArea() {
++    static const bool v = [] {
++      bool enabled = env::getEnvVar("DXVK_FORCE_FULL_RENDER_AREA") == "1";
++      if (enabled)
++        Logger::info("DXVK_FORCE_FULL_RENDER_AREA: render targets use full attachment extent");
++      return enabled;
++    } ();
++    return v;
++  }
++
+   
+   DxvkContext::DxvkContext(const Rc<DxvkDevice>& device)
+   : m_device      (device),
+@@ -2058,14 +2106,14 @@ namespace dxvk {
+     
+     if (clearAspects & VK_IMAGE_ASPECT_DEPTH_BIT)
+       depthOp.loadOpD = VK_ATTACHMENT_LOAD_OP_CLEAR;
+-    else if (discardAspects & VK_IMAGE_ASPECT_DEPTH_BIT)
++    else if ((discardAspects & VK_IMAGE_ASPECT_DEPTH_BIT) && !vmvgaForceDepthLoad())
+       depthOp.loadOpD = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+     else if (hasLoadOpNone)
+       depthOp.loadOpD = VK_ATTACHMENT_LOAD_OP_NONE;
+ 
+     if (clearAspects & VK_IMAGE_ASPECT_STENCIL_BIT)
+       depthOp.loadOpS = VK_ATTACHMENT_LOAD_OP_CLEAR;
+-    else if (discardAspects & VK_IMAGE_ASPECT_STENCIL_BIT)
++    else if ((discardAspects & VK_IMAGE_ASPECT_STENCIL_BIT) && !vmvgaForceDepthLoad())
+       depthOp.loadOpS = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+     else if (hasLoadOpNone)
+       depthOp.loadOpS = VK_ATTACHMENT_LOAD_OP_NONE;
+@@ -2406,12 +2454,15 @@ namespace dxvk {
+           int32_t colorIndex = m_state.om.framebufferInfo.getColorAttachmentIndex(i);
+ 
+           if (colorIndex < 0) {
++            if (vmvgaForceDepthLoad())
++              continue;
+             if ((aspects & VK_IMAGE_ASPECT_DEPTH_BIT) && m_state.om.renderingInfo.rendering.pDepthAttachment)
+               m_state.om.renderingInfo.depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+             if ((aspects & VK_IMAGE_ASPECT_STENCIL_BIT) && m_state.om.renderingInfo.rendering.pStencilAttachment)
+               m_state.om.renderingInfo.stencil.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+           } else if (aspects & VK_IMAGE_ASPECT_COLOR_BIT) {
+-            if (uint32_t(colorIndex) < m_state.om.renderingInfo.rendering.colorAttachmentCount)
++            if (uint32_t(colorIndex) < m_state.om.renderingInfo.rendering.colorAttachmentCount
++             && !vmvgaNoColorStoreDiscard())
+               m_state.om.renderingInfo.color[colorIndex].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+           }
+         }
+@@ -2653,6 +2704,12 @@ namespace dxvk {
+ 
+     // Use attachment access info to set the final load/store ops
+     for (uint32_t i = 0; i < renderingInfo.rendering.colorAttachmentCount; i++) {
++      // With DXVK_NO_COLOR_STORE_DISCARD=1, keep colour LOAD/STORE instead of
++      // demoting an unwritten or unaccessed attachment to NONE/DONT_CARE,
++      // which on a tile-based GPU can drop its contents.
++      if (vmvgaNoColorStoreDiscard())
++        continue;
++
+       adjustAttachmentLoadStoreOps(renderingInfo.color[i],
+         m_state.om.attachmentMask.getColorAccess(i));
+     }
+@@ -2669,7 +2726,8 @@ namespace dxvk {
+ 
+     // If we can prove that the app has only rendered to a portion of
+     // the image, adjust the render area to the exact rendered region.
+-    if (!hasClearOrResolve && m_state.om.renderAreaLo.x < m_state.om.renderAreaHi.x
++    if (!vmvgaForceFullRenderArea()
++     && !hasClearOrResolve && m_state.om.renderAreaLo.x < m_state.om.renderAreaHi.x
+                            && m_state.om.renderAreaLo.y < m_state.om.renderAreaHi.y) {
+       renderingInfo.rendering.renderArea.offset = m_state.om.renderAreaLo;
+       renderingInfo.rendering.renderArea.extent = VkExtent2D {
+@@ -6300,7 +6358,7 @@ namespace dxvk {
+ 
+       VkImageLayout currentLayout = depthAttachment.view->image()->queryLayout(depthAttachment.view->imageSubresources());
+ 
+-      if (currentLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
++      if (currentLayout == VK_IMAGE_LAYOUT_UNDEFINED && !vmvgaForceDepthLoad()) {
+         if (ops.depthOps.loadOpD == VK_ATTACHMENT_LOAD_OP_LOAD)
+           ops.depthOps.loadOpD = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+         if (ops.depthOps.loadOpS == VK_ATTACHMENT_LOAD_OP_LOAD)
+@@ -6334,7 +6392,8 @@ namespace dxvk {
+ 
+         VkImageLayout currentLayout = colorAttachment.view->image()->queryLayout(colorAttachment.view->imageSubresources());
+ 
+-        if (currentLayout == VK_IMAGE_LAYOUT_UNDEFINED && ops.colorOps[i].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD)
++        if (currentLayout == VK_IMAGE_LAYOUT_UNDEFINED && ops.colorOps[i].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD
++         && !vmvgaForceColorLoad())
+           ops.colorOps[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+ 
+         bool discard = ops.colorOps[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR
+@@ -7840,7 +7899,7 @@ namespace dxvk {
+     std::array<VkDeviceSize, MaxNumVertexBindings> strides;
+     
+     bool oldDynamicStrides = m_flags.test(DxvkContextFlag::GpDynamicVertexStrides);
+-    bool newDynamicStrides = true;
++    bool newDynamicStrides = !dxvkMvkStaticVertexStrides();
+ 
+     // Set buffer handles and offsets for active bindings
+     for (uint32_t i = 0; i < m_state.gp.state.il.bindingCount(); i++) {
+@@ -7868,10 +7927,19 @@ namespace dxvk {
+ 
+         m_cmd->track(m_state.vi.vertexBuffers[binding].buffer(), DxvkAccess::Read);
+       } else {
+-        buffers[i] = VK_NULL_HANDLE;
++        // MoltenVK 1.4.2 advertises nullDescriptor but dereferences a null
++        // VkBuffer in vkCmdBindVertexBuffers2. Use DXVK's existing dummy
++        // buffer only for missing vertex bindings.
++        buffers[i] = m_common->dummyResources().bufferInfo().buffer;
+         offsets[i] = 0;
+         lengths[i] = 0;
+         strides[i] = 0;
++
++        // With static strides, expose the whole zero-filled dummy so that
++        // MoltenVK's stride-0 constant step reads zeros, as D3D9 does for
++        // an unbound stream, instead of fetching from a zero-sized range.
++        if (dxvkMvkStaticVertexStrides())
++          lengths[i] = VK_WHOLE_SIZE;
+       }
+     }
+ 
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+index db09fba..decea69 100644
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -852,7 +852,10 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, fillModeNonSolid, true),
+       ENABLE_FEATURE(core.features, fragmentStoresAndAtomics, true),
+       ENABLE_FEATURE(core.features, fullDrawIndexUint32, true),
+-      ENABLE_FEATURE(core.features, geometryShader, true),
++      // MoltenVK intentionally exposes no geometry-shader support on Metal.
++      // Keep it disabled, but allow host bridges that only submit DX9-era
++      // vertex/pixel shaders to use the adapter.
++      ENABLE_FEATURE(core.features, geometryShader, false),
+       ENABLE_FEATURE(core.features, imageCubeArray, true),
+       ENABLE_FEATURE(core.features, independentBlend, true),
+       ENABLE_FEATURE(core.features, largePoints, false),
+@@ -865,7 +868,7 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, sampleRateShading, true),
+       ENABLE_FEATURE(core.features, samplerAnisotropy, true),
+       ENABLE_FEATURE(core.features, shaderClipDistance, true),
+-      ENABLE_FEATURE(core.features, shaderCullDistance, true),
++      ENABLE_FEATURE(core.features, shaderCullDistance, false),
+       ENABLE_FEATURE(core.features, shaderFloat64, false),
+       ENABLE_FEATURE(core.features, shaderImageGatherExtended, true),
+       ENABLE_FEATURE(core.features, shaderInt16, true),
+@@ -950,7 +953,9 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(extCustomBorderColor, customBorderColorWithoutFormat, false),
+ 
+       /* Depth clip matches D3D semantics where depth clamp does not */
+-      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, true),
++      // The VMware SVGA DX9 bridge can use the standard depth-clipping path
++      // when MoltenVK does not expose dynamic depth-clip control.
++      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, false),
+ 
+       /* Controls depth bias behaviour with emulated depth formats */
+       ENABLE_EXT_FEATURE(extDepthBiasControl, depthBiasControl, false),
+@@ -1010,10 +1015,15 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(extPresentTiming, presentAtAbsoluteTime, false),
+       ENABLE_EXT_FEATURE(extPresentTiming, presentAtRelativeTime, false),
+ 
+-      /* Robustness, all features effectively required for correctness */
+-      ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, true),
++      /*
++       * MoltenVK does not currently expose VK_EXT_robustness2. The VMVGA
++       * bridge owns every resource and uses valid ranges, so retain Vulkan's
++       * core robustBufferAccess behaviour while not rejecting that narrow
++       * hardware-vertex-processing D3D9 path at device creation time.
++       */
++      ENABLE_EXT_FEATURE(extRobustness2, robustBufferAccess2, false),
+       ENABLE_EXT_FEATURE(extRobustness2, robustImageAccess2, false),
+-      ENABLE_EXT_FEATURE(extRobustness2, nullDescriptor, true),
++      ENABLE_EXT_FEATURE(extRobustness2, nullDescriptor, false),
+ 
+       /* Sample locations, used to "disable" MSAA rendering */
+       ENABLE_EXT(extSampleLocations, false),
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 2c5334d..310cf5d 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -8,6 +8,28 @@
+ 
+ namespace dxvk {
+ 
++  // MoltenVK 1.4.2 binds vertex buffers with either the static or the
++  // dynamic-stride Metal API depending on the pipeline, and caches bindings
++  // per encoder.  An unbound D3D9 stream that we back with the dummy buffer
++  // at stride 0 under a dynamic-stride pipeline ends up with a static-stride
++  // binding at a dynamic buffer layout ("providing MTLAttributeStrideStatic
++  // to attributeStride when stride ... is dynamic"), which on the GPU reads
++  // through a garbage stride and fails the command buffer with
++  // kIOGPUCommandBufferCallbackErrorInvalidResource.  Static strides keep
++  // MoltenVK on its tested path, including its stride-0 constant step.
++  bool dxvkMvkStaticVertexStrides() {
++    static const bool v = [] {
++      bool enabled = env::getEnvVar("DXVK_MVK_STATIC_VERTEX_STRIDES") == "1";
++
++      if (enabled)
++        Logger::info("DXVK_MVK_STATIC_VERTEX_STRIDES: dynamic vertex strides disabled");
++
++      return enabled;
++    } ();
++
++    return v;
++  }
++
+   VkPrimitiveTopology determineGsInputTopology(
+           VkPrimitiveTopology            shader,
+           VkPrimitiveTopology            state) {
+diff --git a/src/dxvk/dxvk_graphics_state.h b/src/dxvk/dxvk_graphics_state.h
+index 06d5c10..e560821 100644
+--- a/src/dxvk/dxvk_graphics_state.h
++++ b/src/dxvk/dxvk_graphics_state.h
+@@ -10,6 +10,13 @@
+ 
+ namespace dxvk {
+ 
++  /**
++   * \brief DXVK_MVK_STATIC_VERTEX_STRIDES=1
++   *
++   * Never use dynamic vertex strides.  Defined in dxvk_graphics.cpp.
++   */
++  bool dxvkMvkStaticVertexStrides();
++
+   /**
+    * \brief Packed input assembly state
+    *
+@@ -665,7 +672,7 @@ namespace dxvk {
+     }
+ 
+     bool useDynamicVertexStrides() const {
+-      if (!il.bindingCount())
++      if (!il.bindingCount() || dxvkMvkStaticVertexStrides())
+         return false;
+ 
+       bool result = true;
+diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
+index a120a21..3b1bb49 100644
+--- a/src/dxvk/dxvk_instance.cpp
++++ b/src/dxvk/dxvk_instance.cpp
+@@ -219,6 +219,15 @@ namespace dxvk {
+         extensionsEnabled.insert(ext);
+     }
+ 
++#if defined(__APPLE__)
++    // MoltenVK is a Vulkan portability implementation. The loader hides it
++    // unless the application explicitly opts into this extension and flag.
++    auto portability = extensionsSupported.find(
++      vk::makeExtension(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME));
++    if (portability != extensionsSupported.end())
++      extensionsEnabled.insert(*portability);
++#endif
++
+     Logger::info("Enabled instance extensions:");
+ 
+     for (const auto& ext : extensionsEnabled) {
+@@ -255,6 +264,12 @@ namespace dxvk {
+       info.enabledExtensionCount    = extensionNames.size();
+       info.ppEnabledExtensionNames  = extensionNames.data();
+ 
++#if defined(__APPLE__)
++      if (extensionsEnabled.find(vk::makeExtension(
++            VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) != extensionsEnabled.end())
++        info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
++#endif
++
+       VkResult status = m_vkl->vkCreateInstance(&info, nullptr, &instance);
+ 
+       if (status != VK_SUCCESS) {
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+index fc18044..c85afe8 100644
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -1,4 +1,5 @@
+ #include <algorithm>
++#include <cstdlib>
+ #include <iomanip>
+ #include <sstream>
+ 
+@@ -212,6 +213,23 @@ namespace dxvk {
+     viewInfo.viewType = key.viewType;
+     viewInfo.format = key.format;
+     viewInfo.components = key.unpackSwizzle();
++
++    /* VMVGA diagnostic: a Win7 Aero investigation measured D3D9 texture
++     * sampling returning (r,r,r,1) from a correct BGRA8 image, while DXVK's
++     * D3D9 format table provably maps A8R8G8B8 to an identity swizzle.  Log
++     * exactly what reaches vkCreateImageView so the swizzle can be observed
++     * rather than inferred.  Opt-in; prints nothing unless the env var is set. */
++    if (std::getenv("VMVGA_DXVK_VIEW_LOG") != nullptr) {
++      Logger::warn(str::format("VMVGA-DXVK-VIEW format=", uint32_t(viewInfo.format),
++        " type=", uint32_t(viewInfo.viewType),
++        " usage=0x", std::hex, uint32_t(key.usage), std::dec,
++        " packed=0x", std::hex, uint32_t(key.packedSwizzle), std::dec,
++        " r=", uint32_t(viewInfo.components.r),
++        " g=", uint32_t(viewInfo.components.g),
++        " b=", uint32_t(viewInfo.components.b),
++        " a=", uint32_t(viewInfo.components.a)));
++    }
++
+     viewInfo.subresourceRange.aspectMask = key.aspects;
+     viewInfo.subresourceRange.baseMipLevel = key.mipIndex;
+     viewInfo.subresourceRange.levelCount = key.mipCount;
+@@ -802,6 +820,9 @@ namespace dxvk {
+     for (uint32_t i = 0; i < m_memHeapCount; i++)
+       freeEmptyChunksInHeap(m_memHeaps[i], VkDeviceSize(-1), high_resolution_clock::time_point());
+ 
++    // The device is idle by now, release anything still postponed
++    drainDeferredFrees(high_resolution_clock::now(), true);
++
+     // Ensure adapter allocation statistics are consistent
+     // when the deivce is being destroyed
+     for (uint32_t i = 0; i < m_memHeapCount; i++) {
+@@ -1625,13 +1646,62 @@ namespace dxvk {
+           DxvkMemoryType&       type,
+           DxvkDeviceMemory      memory) {
+     auto vk = m_device->vkd();
+-    vk->vkDestroyBuffer(vk->device(), memory.buffer, nullptr);
+-    vk->vkFreeMemory(vk->device(), memory.memory, nullptr);
++
++    // DXVK_CHUNK_FREE_GRACE=1: MoltenVK implements the timeline semaphore
++    // DXVK waits on as an MTLSharedEvent that the GPU signals from inside
++    // the command buffer, i.e. before the MTLCommandBuffer has completed.
++    // On macOS with residency sets MoltenVK also stops retaining resources
++    // per command buffer, so a chunk freed in that window is torn down while
++    // Metal still considers it in use: Metal's debug layer reports it as
++    // "destroyed while still required to be alive by the command buffer"
++    // and without it the GPU faults with kIOGPUCommandBufferCallbackError-
++    // InvalidResource -> VK_ERROR_DEVICE_LOST.  Postpone the real free by a
++    // couple of seconds, which is far longer than that window.
++    static const bool deferFree = [] {
++      bool enabled = env::getEnvVar("DXVK_CHUNK_FREE_GRACE") == "1";
++
++      if (enabled)
++        Logger::info("DXVK_CHUNK_FREE_GRACE: chunk frees postponed");
++
++      return enabled;
++    } ();
++
++    if (deferFree) {
++      auto now = high_resolution_clock::now();
++      m_deferredFrees.push_back({ memory.buffer, memory.memory, now });
++      drainDeferredFrees(now, false);
++    } else {
++      vk->vkDestroyBuffer(vk->device(), memory.buffer, nullptr);
++      vk->vkFreeMemory(vk->device(), memory.memory, nullptr);
++    }
+ 
+     type.stats.memoryAllocated -= memory.size;
+   }
+ 
+ 
++  void DxvkMemoryAllocator::drainDeferredFrees(
++          high_resolution_clock::time_point currentTime,
++          bool                  force) {
++    static constexpr auto Delay = std::chrono::seconds(2u);
++
++    auto vk = m_device->vkd();
++    size_t kept = 0u;
++
++    for (size_t i = 0u; i < m_deferredFrees.size(); i++) {
++      const auto& entry = m_deferredFrees[i];
++
++      if (force || currentTime - entry.time >= Delay) {
++        vk->vkDestroyBuffer(vk->device(), entry.buffer, nullptr);
++        vk->vkFreeMemory(vk->device(), entry.memory, nullptr);
++      } else {
++        m_deferredFrees[kept++] = entry;
++      }
++    }
++
++    m_deferredFrees.resize(kept);
++  }
++
++
+   void DxvkMemoryAllocator::freeAllocation(
+           DxvkResourceAllocation* allocation) {
+     if (allocation->m_flags.test(DxvkAllocationFlag::ClearOnFree)) {
+@@ -1745,6 +1815,23 @@ namespace dxvk {
+           DxvkMemoryPool&       pool,
+           VkDeviceSize          allocationSize,
+           high_resolution_clock::time_point time) {
++    // Diagnostic, opt-in, default off.  Metal's debug layer caught a 32 MiB
++    // chunk being deallocated while a submitted MTLCommandBuffer still
++    // required it, which surfaces as
++    //   Invalid Resource (kIOGPUCommandBufferCallbackErrorInvalidResource)
++    // and then VK_ERROR_DEVICE_LOST.  A chunk is freed here once no pages in
++    // it are allocated, which is a statement about the allocator, not about
++    // work still in flight on the queue.  Setting DXVK_HOLD_EMPTY_CHUNKS=1
++    // retains every empty chunk instead.  If the device stops being lost,
++    // chunk recycling is confirmed as the mechanism.  This deliberately
++    // wastes memory and is an evidence change, not a fix.
++    {
++      static const bool holdChunks = env::getEnvVar("DXVK_HOLD_EMPTY_CHUNKS") == "1";
++
++      if (holdChunks)
++        return false;
++    }
++
+     // Allow for one unused max-size chunk on device-local memory types.
+     // For mapped memory allocations, we need to be more lenient since
+     // applications will frequently allocate staging buffers or dynamic
+@@ -1771,16 +1858,28 @@ namespace dxvk {
+       // Free the chunk if it is smaller than the current chunk size of
+       // the pool, since it is unlikely to be useful for future allocations.
+       // Also free if the pending allocation would exceed the heap budget.
+-      bool shouldFree = chunk.memory.size < pool.nextChunkSize
+-        || allocationSize + heapAllocated > heapBudget
++      // DXVK_CHUNK_FREE_GRACE=1: on MoltenVK, Metal's debug layer caught a
++      // 32 MiB chunk being deallocated while a submitted MTLCommandBuffer
++      // still required it (Invalid Resource -> VK_ERROR_DEVICE_LOST).  The
++      // two immediate triggers below free a chunk the moment its pages are
++      // unused, which says nothing about work still in flight.  With the
++      // grace period only budget pressure frees immediately; every other
++      // empty chunk waits for the existing 20 s unused timer further down,
++      // which keeps memory bounded unlike retaining chunks forever.
++      static const bool chunkGrace = env::getEnvVar("DXVK_CHUNK_FREE_GRACE") == "1";
++
++      bool budgetPressure = allocationSize + heapAllocated > heapBudget
+         || allocationSize > heapBudget;
+ 
++      bool shouldFree = budgetPressure
++        || (!chunkGrace && chunk.memory.size < pool.nextChunkSize);
++
+       // If we still don't free the chunk under these conditions, count it
+       // towards unused memory in the current memory pool. Once we exceed
+       // the limit, free any empty chunk we encounter.
+       if (!shouldFree) {
+         unusedMemory += chunk.memory.size;
+-        shouldFree = unusedMemory > maxUnusedMemory;
++        shouldFree = !chunkGrace && unusedMemory > maxUnusedMemory;
+       }
+ 
+       // Free chunks that have not been used in some time, but only free
+@@ -2754,6 +2853,9 @@ namespace dxvk {
+     // Re-query current memory budgets
+     updateMemoryHeapBudgets();
+ 
++    // Release chunks whose postponed free has expired
++    drainDeferredFrees(currentTime, false);
++
+     // Periodically free unused memory chunks and update
+     // memory allocation statistics for the adapter.
+     for (uint32_t i = 0; i < m_memHeapCount; i++)
+diff --git a/src/dxvk/dxvk_memory.h b/src/dxvk/dxvk_memory.h
+index a8e4486..3d8c0a6 100644
+--- a/src/dxvk/dxvk_memory.h
++++ b/src/dxvk/dxvk_memory.h
+@@ -1400,6 +1400,16 @@ namespace dxvk {
+     alignas(CACHE_LINE_SIZE)
+     DxvkRelocationList        m_relocations;
+ 
++    // DXVK_CHUNK_FREE_GRACE=1: chunks whose vkFreeMemory is postponed,
++    // see freeDeviceMemory.  Protected by m_mutex.
++    struct DeferredFree {
++      VkBuffer        buffer;
++      VkDeviceMemory  memory;
++      high_resolution_clock::time_point time;
++    };
++
++    std::vector<DeferredFree> m_deferredFrees;
++
+     DxvkDeviceMemory allocateDeviceMemory(
+             DxvkMemoryType&       type,
+             VkDeviceSize          size,
+@@ -1420,6 +1430,10 @@ namespace dxvk {
+             DxvkMemoryType&       type,
+             DxvkDeviceMemory      memory);
+ 
++    void drainDeferredFrees(
++            high_resolution_clock::time_point currentTime,
++            bool                  force);
++
+     void freeAllocation(
+             DxvkResourceAllocation* allocation);
+ 
+diff --git a/src/dxvk/dxvk_queue.cpp b/src/dxvk/dxvk_queue.cpp
+index e705ed9..db64132 100644
+--- a/src/dxvk/dxvk_queue.cpp
++++ b/src/dxvk/dxvk_queue.cpp
+@@ -267,6 +267,10 @@ namespace dxvk {
+ 
+           status = vk->vkWaitSemaphores(vk->device(), &waitInfo, ~0ull);
+ 
++          // No-op unless DXVK_MVK_COMPLETION_FENCE=1
++          if (status == VK_SUCCESS)
++            status = entry.submit.cmdList->waitCompletionFence();
++
+           if (entry.latency.tracker && status == VK_SUCCESS)
+             entry.latency.tracker->notifyGpuExecutionEnd(entry.latency.frameId);
+         }
+diff --git a/src/util/util_env.cpp b/src/util/util_env.cpp
+index 912d6ec..9592aca 100644
+--- a/src/util/util_env.cpp
++++ b/src/util/util_env.cpp
+@@ -14,6 +14,12 @@
+ 
+ #include "util_env.h"
+ 
++#if defined(__APPLE__)
++#include <mach-o/dyld.h>
++#include <limits.h>
++#include <stdlib.h>
++#endif
++
+ #include "./com/com_include.h"
+ 
+ namespace dxvk::env {
+@@ -113,6 +119,28 @@ namespace dxvk::env {
+     }
+ 
+     return std::string(exePath);
++#elif defined(__APPLE__)
++    // macOS has no /proc. _NSGetExecutablePath() may return a path containing
++    // symlinks or '..', so resolve it; fall back to the raw path if realpath
++    // fails. Without this branch the function falls off the end without
++    // returning, which is UB - clang emits a trap and DXVK dies with SIGTRAP
++    // the first time anything calls getExeName().
++    uint32_t bufSize = 0;
++    _NSGetExecutablePath(nullptr, &bufSize);
++
++    std::vector<char> exePath(bufSize + 1, '\0');
++
++    if (_NSGetExecutablePath(exePath.data(), &bufSize) != 0)
++      return "";
++
++    char resolved[PATH_MAX] = {};
++
++    if (realpath(exePath.data(), resolved) != nullptr)
++      return std::string(resolved);
++
++    return std::string(exePath.data());
++#else
++#error "getExePath() has no implementation for this platform"
+ #endif
+   }
+   
+diff --git a/src/util/util_math.h b/src/util/util_math.h
+index 9276d93..a712940 100644
+--- a/src/util/util_math.h
++++ b/src/util/util_math.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <cmath>
++#include <cstddef>
+ 
+ namespace dxvk {
+   
+diff --git a/src/util/util_win32_compat.h b/src/util/util_win32_compat.h
+index b706dca..7a4b4a1 100644
+--- a/src/util/util_win32_compat.h
++++ b/src/util/util_win32_compat.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-#if defined(__unix__)
++#if defined(__unix__) || defined(__APPLE__)
+ 
+ #include <windows.h>
+ #include <dlfcn.h>
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index f9d1e98..031a570 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -10,10 +10,21 @@
+ namespace dxvk::vk {
+ 
+   static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadVulkanLibrary() {
+-    static const std::array<const char*, 2> dllNames = {{
++    static const std::array<const char*, 3> dllNames = {{
+ #ifdef _WIN32
+       "winevulkan.dll",
+       "vulkan-1.dll",
++#elif defined(__APPLE__)
++      // macOS uses .dylib naming; libvulkan is the loader that fronts
++      // MoltenVK, and libMoltenVK is the direct fallback if no loader
++      // is installed.
++      // QEMU is code-signed on macOS, so SIP ignores DYLD_LIBRARY_PATH.
++      // Homebrew's Vulkan loader must therefore be addressed explicitly.
++      "/opt/homebrew/lib/libvulkan.1.dylib",
++      "/opt/homebrew/lib/libvulkan.dylib",
++      // Running against MoltenVK directly is a useful fallback when the
++      // loader is absent, and it exports vkGetInstanceProcAddr as well.
++      "/opt/homebrew/lib/libMoltenVK.dylib",
+ #else
+       "libvulkan.so",
+       "libvulkan.so.1",
+diff --git a/src/wsi/sdl2/wsi_platform_sdl2.cpp b/src/wsi/sdl2/wsi_platform_sdl2.cpp
+index 203cb6d..9dbe37a 100644
+--- a/src/wsi/sdl2/wsi_platform_sdl2.cpp
++++ b/src/wsi/sdl2/wsi_platform_sdl2.cpp
+@@ -14,11 +14,23 @@ namespace dxvk::wsi {
+ #if defined(_WIN32)
+         "SDL2.dll"
+ #elif defined(__APPLE__)
+-        "libSDL2-2.0.0.dylib"
++        // qemu-vmvga integration: QEMU already has the real SDL2 loaded for
++        // -display sdl, so dlopen("libSDL2-2.0.0.dylib") would hand back that
++        // instance rather than QEMU's WSI shim. Upstream dodges this on Linux
++        // by synthesizing an ELF object in a sealed memfd; because we build
++        // DXVK ourselves we can simply look for a distinct name instead, and
++        // let QEMU ship an ordinary dylib under it. Falls back to real SDL2.
++        "libvmsvga3d_wsi.dylib"
+ #else
+         "libSDL2-2.0.so.0"
+ #endif
+       );
++#if defined(__APPLE__)
++    // No shim present: fall back to the genuine SDL2 so a standalone
++    // dxvk-native build still works outside QEMU.
++    if (libsdl == nullptr)
++      libsdl = LoadLibraryA("libSDL2-2.0.0.dylib");
++#endif
+     if (libsdl == nullptr)
+       throw DxvkError("SDL2 WSI: Failed to load SDL2 DLL.");
+ 
+diff --git a/subprojects/dxbc-spirv b/subprojects/dxbc-spirv
+--- a/subprojects/dxbc-spirv
++++ b/subprojects/dxbc-spirv
+@@ -1 +1 @@
+-Subproject commit bf14419e5fa7eacb817b7b632f03cb61d61bbad7
++Subproject commit bf14419e5fa7eacb817b7b632f03cb61d61bbad7-dirty
+diff --git a/subprojects/libdisplay-info b/subprojects/libdisplay-info
+--- a/subprojects/libdisplay-info
++++ b/subprojects/libdisplay-info
+@@ -1 +1 @@
+-Subproject commit 275e6459c7ab1ddd4b125f28d0440716e4888078
++Subproject commit 275e6459c7ab1ddd4b125f28d0440716e4888078-dirty

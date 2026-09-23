@@ -1,0 +1,18 @@
+diff --git a/meson.build b/meson.build
+index cccaa8d..9ea22b8 100644
+--- a/meson.build
++++ b/meson.build
+@@ -45,7 +45,12 @@ add_project_arguments(cc.get_supported_arguments([
+ ]), language: 'c')
+ 
+ symbols_file = 'libdisplay-info.map'
+-symbols_flag = '-Wl,--version-script,@0@'.format(meson.current_source_dir() / symbols_file)
++# ld64 rejects --version-script (GNU ld only)
++if host_machine.system() == 'darwin'
++  symbols_flag = []
++else
++  symbols_flag = '-Wl,--version-script,@0@'.format(meson.current_source_dir() / symbols_file)
++endif
+ 
+ di_lib = static_library(
+ 	'display-info',

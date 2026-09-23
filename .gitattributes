@@ -1,0 +1,9 @@
+# Windows batch files must keep CRLF line endings
+*.CMD text eol=crlf
+*.cmd text eol=crlf
+guest/README.TXT text eol=crlf
+*.in text eol=crlf
+# Binaries
+*.exe binary
+*.jpg binary
+*.patch -text

@@ -1,0 +1,36 @@
+@echo off
+rem Cosmetic: show the host Mac GPU name instead of "VMware SVGA 3D".
+rem @@GPU_NAME@@ / @@GPU_HEX@@ are filled in by Setup.command on the Mac.
+rem Runs as SYSTEM at every startup (task "HostGpuName"), because the VMware
+rem miniport rewrites HardwareInformation.* each time it starts.
+setlocal EnableExtensions
+set NAME=@@GPU_NAME@@
+set HEX=@@GPU_HEX@@
+rem give vm3dmp.sys time to write its values first
+ping -n 20 127.0.0.1 >nul
+
+rem 1. Display class instances of the VMware SVGA device (Device Manager
+rem    driver description, D3D9 adapter description, DxDiag, WinSAT)
+for /f "delims=" %%K in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}" /s /f "ven_15ad&dev_0405" /d ^| findstr /b /i "HKEY_"') do (
+  reg add "%%K" /v DriverDesc /t REG_SZ /d "%NAME%" /f >nul
+  reg add "%%K" /v ProviderName /t REG_SZ /d "Apple" /f >nul
+  reg add "%%K" /v HardwareInformation.AdapterString /t REG_BINARY /d %HEX% /f >nul
+  reg add "%%K" /v HardwareInformation.ChipType /t REG_BINARY /d %HEX% /f >nul
+)
+
+rem 2. Video keys (EnumDisplayDevices DeviceString, DxDiag chip/adapter strings)
+for /f "delims=" %%K in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Video" /s /f "HardwareInformation.AdapterString" /v ^| findstr /b /i "HKEY_"') do (
+  reg add "%%K" /v DriverDesc /t REG_SZ /d "%NAME%" /f >nul
+  reg add "%%K" /v "Device Description" /t REG_SZ /d "%NAME%" /f >nul
+  reg add "%%K" /v ProviderName /t REG_SZ /d "Apple" /f >nul
+  reg add "%%K" /v HardwareInformation.AdapterString /t REG_BINARY /d %HEX% /f >nul
+  reg add "%%K" /v HardwareInformation.ChipType /t REG_BINARY /d %HEX% /f >nul
+)
+
+rem 3. The PCI device instance (Device Manager title); needs SYSTEM
+for /f "delims=" %%K in ('reg query "HKLM\SYSTEM\CurrentControlSet\Enum\PCI" /s /f "SVGA" /d ^| findstr /b /i "HKEY_.*VEN_15AD&DEV_0405"') do (
+  reg add "%%K" /v FriendlyName /t REG_SZ /d "%NAME%" /f >nul
+  reg add "%%K" /v DeviceDesc /t REG_SZ /d "%NAME%" /f >nul
+  reg add "%%K" /v Mfg /t REG_SZ /d "Apple" /f >nul
+)
+exit /b 0

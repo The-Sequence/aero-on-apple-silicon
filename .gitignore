@@ -1,0 +1,12 @@
+# local, not part of the project
+runtime/
+downloads/
+vms/
+logs/
+build/work/
+guest-tools.iso
+guest/graphics/
+guest/vmtools/
+guest/gpuname/APPLY.CMD
+.DS_Store
+qemu-system-*.log
