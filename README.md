@@ -46,7 +46,7 @@ Screenshots from the actual work, in order. Every one of these was a real state 
 | ![Windows Photo Viewer with correct Aero glass](media/07-aero-colour.jpg) **7. Correct glass.** Full colour, proper transparency, clean frames around a D3D application. | ![The guest tools setup script running in Windows](media/08-guest-setup.jpg) **8. One-step guest setup.** Driver, resize agent, watchdog fix and GPU name, without VMware Tools. |
 | ![The Windows 7 Aero desktop with Start menu and Task Manager](media/win7-aero.jpg) **9. Normal.** Aero glass, DWM running, and it just behaves like Windows. | ![3DMark06 failing with D3DERR_DEVICELOST](media/09-3dmark06-device-lost.jpg) **10. Still open.** 3DMark06 runs, but slowly, and can still die with `D3DERR_DEVICELOST`. Help welcome. |
 
-## Getting started
+## How to run Windows 7 with Aero Glass on M1/M2/M3/M4 Macs
 
 **You need:** an Apple Silicon Mac, [Homebrew](https://brew.sh), about 40 GB of free disk space, and your own Windows 7 or Vista installation ISO.
 
@@ -71,7 +71,13 @@ Then open the folder and **double-click `START HERE.command`**. That is the whol
 
 You never need a second Terminal window. VMs run in the background, the VM window's close button is disabled so an install can't be cut off by accident, and your Mac is kept awake while a VM runs. If the control screen can't run in your Terminal, it falls back to a plain step-by-step wizard (`./START\ HERE.command --plain` forces it).
 
-**Tips**
+## Accelerating 3D Graphics in Windows Guest VMs on macOS
+
+This project accelerates the guest's D3D9 graphics by translating VMware SVGA3D commands through DXVK and MoltenVK to Metal on the Mac GPU. It does not accelerate the x86 guest CPU: QEMU TCG still emulates that CPU on Apple Silicon. For the rendering architecture, measured bottlenecks and individual compatibility fixes, see [TECHNICAL.md](TECHNICAL.md).
+
+For the best current performance, use a smaller VM window, keep the default multi-threaded TCG setting, and avoid CPU-heavy workloads. Aero, older D3D9 applications and older games benefit most; DirectX 10 and 11 are not supported yet.
+
+## Troubleshooting QEMU Windows Guest VM GPU Performance
 
 - **Do not install VMware Tools in the guest.** It makes the login screen crawl. `SETUP.CMD` installs only what is needed: the display driver, clipboard sharing, the resize and status helper, and two registry fixes.
 - **Use a lower resolution.** The smaller the VM window (and so Windows' resolution), the smoother everything runs: every frame is copied back from the Mac's GPU, and that cost grows with the pixel count. Something like 1280×800 is far less choppy than full screen on a big display. Just resize the VM window; Windows follows it.
