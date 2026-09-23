@@ -1,14 +1,14 @@
 # Aero on Apple Silicon
 
-**Windows 7 and Windows Vista with working Aero glass on an M-series Mac, with the 3D rendered by the Mac's own GPU.**
+**Windows 7 and Windows Vista with working Aero glass on an M-series Mac**
 
 ![Windows 7 Enterprise with a Windows Experience Index of 6.0, next to About This Mac showing an Apple M4 Pro](media/hero-win7-wei.jpg)
 
-*Windows 7 scoring 6.0 for both Aero desktop and 3D gaming graphics, running on the M4 Pro shown beside it.*
+
 
 ![Windows Vista Ultimate with Aero glass and a Windows Experience Index of 5.2, next to About This Mac showing an Apple M4 Pro](media/hero-vista-wei.jpg)
 
-*The same on Windows Vista Ultimate SP2: Aero glass, sidebar gadgets, and 5.9 for both Aero desktop and 3D gaming graphics.*
+*The same on Windows Vista Ultimate SP2: Aero glass, sidebar gadgets*
 
 This is a patched QEMU that emulates VMware's virtual 3D graphics card. Windows loads VMware's own display driver and thinks it has real hardware. QEMU translates the Direct3D commands to Vulkan with [DXVK](https://github.com/doitsujin/dxvk), and [MoltenVK](https://github.com/KhronosGroup/MoltenVK) runs them on Metal.
 
