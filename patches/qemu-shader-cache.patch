@@ -1,0 +1,137 @@
+--- a/hw/display/vmware_vga_dxvk.c
++++ b/hw/display/vmware_vga_dxvk.c
+@@ -2605,6 +2605,12 @@
+     }
+ #endif
+ }
++
++#if (defined(CONFIG_LINUX) && defined(__ELF__)) || defined(__APPLE__)
++static void vmsvga3d_shader_cache_flush(void);
++#else
++static inline void vmsvga3d_shader_cache_flush(void) {}
++#endif
+ 
+ void vmsvga3d_dxvk_destroy(VMSVGA3DDxvk *dxvk)
+ {
+@@ -2671,6 +2677,9 @@
+         dxvk->d3d9_pristine_state = NULL;
+     }
+ 
++    /* Cached shaders belong to this device: drop them before it goes. */
++    vmsvga3d_shader_cache_flush();
++
+     if (dxvk->d3d9_device != NULL) {
+         vmsvga3d_dxvk_release(dxvk->d3d9_device,
+                               VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
+@@ -15067,7 +15076,61 @@
+     return false;
+ #endif
+ }
++
++#if (defined(CONFIG_LINUX) && defined(__ELF__)) || defined(__APPLE__)
++/* Aero: Windows' DWM keeps destroying and re-defining byte-identical shaders
++ * (the shader ids climb, the code does not change).  Each re-definition used
++ * to cost a full DXVK/MoltenVK compile on QEMU's main loop, which is where
++ * the multi-second display freezes came from.  VMVGA_SHADER_CACHE=1 keeps
++ * one native shader per (stage, bytecode) and hands out extra references. */
++static GHashTable *vmsvga3d_shader_cache;
+ 
++static bool vmsvga3d_shader_cache_enabled(void)
++{
++    static int enabled = -1;
++
++    if (enabled < 0) {
++        enabled = g_strcmp0(getenv("VMVGA_SHADER_CACHE"), "1") == 0;
++    }
++    return enabled;
++}
++
++static GBytes *vmsvga3d_shader_cache_key(uint32_t stage,
++                                         const uint32_t *bytecode)
++{
++    size_t words = 1;
++    GByteArray *key;
++
++    /* SM1-3 token stream: version token, ..., D3DSIO_END (0x0000FFFF). */
++    while (words < 65536 && bytecode[words] != 0x0000FFFFu) {
++        words++;
++    }
++    if (words >= 65536) {
++        return NULL;
++    }
++    words++;
++
++    key = g_byte_array_sized_new(sizeof(stage) + words * sizeof(uint32_t));
++    g_byte_array_append(key, (const guint8 *)&stage, sizeof(stage));
++    g_byte_array_append(key, (const guint8 *)bytecode,
++                        words * sizeof(uint32_t));
++    return g_byte_array_free_to_bytes(key);
++}
++
++static void vmsvga3d_shader_cache_value_free(gpointer shader)
++{
++    vmsvga3d_dxvk_release(shader, VMSVGA3D_DXVK_IDIRECT3DDEVICE9_RELEASE);
++}
++
++static void vmsvga3d_shader_cache_flush(void)
++{
++    if (vmsvga3d_shader_cache != NULL) {
++        g_hash_table_destroy(vmsvga3d_shader_cache);
++        vmsvga3d_shader_cache = NULL;
++    }
++}
++#endif
++
+ void *vmsvga3d_dxvk_shader_create(VMSVGA3DDxvk *dxvk, uint32_t stage,
+                                   const uint32_t *bytecode)
+ {
+@@ -15094,9 +15157,47 @@
+         return NULL;
+     }
+ 
+-    result = create_shader(dxvk->d3d9_device, bytecode, &shader);
++    {
++        g_autoptr(GBytes) key = NULL;
++        int64_t t0;
+ 
+-    return vmsvga3d_dxvk_succeeded(result) ? shader : NULL;
++        if (vmsvga3d_shader_cache_enabled() &&
++            (key = vmsvga3d_shader_cache_key(stage, bytecode)) != NULL) {
++            void *cached;
++
++            if (vmsvga3d_shader_cache == NULL) {
++                vmsvga3d_shader_cache = g_hash_table_new_full(
++                    g_bytes_hash, g_bytes_equal,
++                    (GDestroyNotify)g_bytes_unref,
++                    vmsvga3d_shader_cache_value_free);
++            }
++            cached = g_hash_table_lookup(vmsvga3d_shader_cache, key);
++            if (cached != NULL &&
++                vmsvga3d_dxvk_addref(cached, VMSVGA3D_DXVK_IUNKNOWN_ADDREF)) {
++                return cached;
++            }
++        }
++
++        t0 = g_get_monotonic_time();
++        result = create_shader(dxvk->d3d9_device, bytecode, &shader);
++        t0 = g_get_monotonic_time() - t0;
++        if (t0 >= 5000) {
++            fprintf(stderr, "AERO-SHADER-CREATE stage=%u %" PRId64 " ms\n",
++                    stage, t0 / 1000);
++        }
++
++        if (!vmsvga3d_dxvk_succeeded(result) || shader == NULL) {
++            return NULL;
++        }
++
++        /* The cache owns one reference; the caller gets its own. */
++        if (key != NULL &&
++            vmsvga3d_dxvk_addref(shader, VMSVGA3D_DXVK_IUNKNOWN_ADDREF)) {
++            g_hash_table_insert(vmsvga3d_shader_cache,
++                                g_bytes_ref(key), shader);
++        }
++        return shader;
++    }
+ #else
+     (void)dxvk;
+     (void)stage;

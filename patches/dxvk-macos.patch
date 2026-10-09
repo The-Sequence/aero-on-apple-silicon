@@ -1005,15 +1005,3 @@ index 203cb6d..9dbe37a 100644
      if (libsdl == nullptr)
        throw DxvkError("SDL2 WSI: Failed to load SDL2 DLL.");
  
-diff --git a/subprojects/dxbc-spirv b/subprojects/dxbc-spirv
---- a/subprojects/dxbc-spirv
-+++ b/subprojects/dxbc-spirv
-@@ -1 +1 @@
--Subproject commit bf14419e5fa7eacb817b7b632f03cb61d61bbad7
-+Subproject commit bf14419e5fa7eacb817b7b632f03cb61d61bbad7-dirty
-diff --git a/subprojects/libdisplay-info b/subprojects/libdisplay-info
---- a/subprojects/libdisplay-info
-+++ b/subprojects/libdisplay-info
-@@ -1 +1 @@
--Subproject commit 275e6459c7ab1ddd4b125f28d0440716e4888078
-+Subproject commit 275e6459c7ab1ddd4b125f28d0440716e4888078-dirty

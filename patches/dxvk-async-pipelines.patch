@@ -1,0 +1,170 @@
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 310cf5d3..d3793243 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -1,6 +1,14 @@
+ #include <iomanip>
+ 
+ #include "../util/util_time.h"
++#include "../util/util_env.h"
++#include <thread>
++#include <fstream>
++#include <iterator>
++#include <mutex>
++#include <vector>
++#include <cstdio>
++#include <cstdlib>
+ 
+ #include "dxvk_device.h"
+ #include "dxvk_graphics.h"
+@@ -1105,6 +1113,84 @@ namespace dxvk {
+   }
+ 
+ 
++  // Aero: persistent Vulkan pipeline cache. DXVK 3 has no state cache, so
++  // every boot recompiled the same Metal pipelines through MoltenVK.
++  // DXVK_PIPELINE_CACHE_FILE=<path> loads it at first use and rewrites it
++  // (atomically) after every few new pipelines.
++  static std::mutex           g_aeroCacheMutex;
++  static VkPipelineCache      g_aeroCache   = VK_NULL_HANDLE;
++  static std::atomic<uint32_t> g_aeroCacheNew = { 0u };
++
++  static const std::string& aeroCachePath() {
++    static const std::string path = env::getEnvVar("DXVK_PIPELINE_CACHE_FILE");
++    return path;
++  }
++
++  static VkPipelineCache aeroPipelineCache(const Rc<vk::DeviceFn>& vk) {
++    if (aeroCachePath().empty())
++      return VK_NULL_HANDLE;
++
++    std::lock_guard lock(g_aeroCacheMutex);
++
++    if (!g_aeroCache) {
++      std::vector<char> data;
++      std::ifstream in(aeroCachePath(), std::ios::binary);
++      if (in)
++        data.assign(std::istreambuf_iterator<char>(in), {});
++
++      VkPipelineCacheCreateInfo info = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
++      info.initialDataSize = data.size();
++      info.pInitialData    = data.empty() ? nullptr : data.data();
++
++      if (vk->vkCreatePipelineCache(vk->device(), &info, nullptr, &g_aeroCache)) {
++        info.initialDataSize = 0;
++        info.pInitialData    = nullptr;
++        if (vk->vkCreatePipelineCache(vk->device(), &info, nullptr, &g_aeroCache))
++          g_aeroCache = VK_NULL_HANDLE;
++      }
++
++      Logger::info(str::format("AERO-PIPELINE-CACHE loaded ", data.size(), " bytes"));
++    }
++
++    return g_aeroCache;
++  }
++
++  static void aeroPipelineCacheSave(const Rc<vk::DeviceFn>& vk) {
++    if (!g_aeroCache || (++g_aeroCacheNew % 4u) != 0u)
++      return;
++
++    std::lock_guard lock(g_aeroCacheMutex);
++    size_t size = 0;
++
++    if (vk->vkGetPipelineCacheData(vk->device(), g_aeroCache, &size, nullptr) || !size)
++      return;
++
++    std::vector<char> data(size);
++    if (vk->vkGetPipelineCacheData(vk->device(), g_aeroCache, &size, data.data()))
++      return;
++
++    std::string tmp = aeroCachePath() + ".tmp";
++    { std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
++      out.write(data.data(), std::streamsize(size)); }
++    std::rename(tmp.c_str(), aeroCachePath().c_str());
++  }
++
++
++  static bool asyncPipelinesEnabled() {
++    static const bool enabled = env::getEnvVar("DXVK_ASYNC_PIPELINES") == "1";
++    return enabled;
++  }
++
++
++  static uint32_t asyncPipelineWaitMs() {
++    static const uint32_t ms = [] {
++      std::string v = env::getEnvVar("DXVK_ASYNC_WAIT_MS");
++      return v.empty() ? 150u : uint32_t(std::strtoul(v.c_str(), nullptr, 10));
++    }();
++    return ms;
++  }
++
++
+   DxvkGraphicsPipelineHandle DxvkGraphicsPipeline::getPipelineHandle(
+     const DxvkGraphicsPipelineStateInfo& state) {
+     DxvkGraphicsPipelineInstance* instance = this->findInstance(state);
+@@ -1122,6 +1208,30 @@ namespace dxvk {
+         // Keep pipeline object locked, at worst we're going to stall
+         // a state cache worker and the current thread needs priority.
+         bool canCreateBasePipeline = this->canCreateBasePipeline(state);
++
++        // Aero/vmvga: without graphics pipeline libraries (MoltenVK), a
++        // cache miss compiles the full Metal pipeline right here and stalls
++        // the caller (QEMU's main loop) for up to seconds. With
++        // DXVK_ASYNC_PIPELINES=1, hand the compile to a worker, wait a short
++        // budget, and skip the draw if it is still not ready.
++        if (!canCreateBasePipeline && asyncPipelinesEnabled()) {
++          instance = m_pipelines.add(state, VK_NULL_HANDLE, VK_NULL_HANDLE,
++            computeAttachmentMask(state));
++          m_stats->numGraphicsPipelines += 1;
++          lock.unlock();
++
++          m_workers->compileGraphicsPipeline(this, state, DxvkPipelinePriority::High);
++
++          auto deadline = dxvk::high_resolution_clock::now()
++            + std::chrono::milliseconds(asyncPipelineWaitMs());
++
++          while (!instance->fastHandle.load()
++              && dxvk::high_resolution_clock::now() < deadline)
++            std::this_thread::sleep_for(std::chrono::microseconds(200));
++
++          return instance->getHandle();
++        }
++
+         instance = this->createInstance(state, canCreateBasePipeline);
+ 
+         // Unlock here since we may dispatch the pipeline to a worker,
+@@ -1414,7 +1524,8 @@ namespace dxvk {
+       flags.pNext = std::exchange(info.pNext, &flags);
+ 
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
++    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), aeroPipelineCache(vk), 1, &info, nullptr, &pipeline);
++    if (!vr) aeroPipelineCacheSave(vk);
+ 
+     if (vr && vr != VK_PIPELINE_COMPILE_REQUIRED_EXT)
+       Logger::err(str::format("DxvkGraphicsPipeline: Failed to create base pipeline: ", vr));
+@@ -1440,7 +1551,14 @@ namespace dxvk {
+     if (entry.second) {
+       // Pipeline doesn't exist yet. Compile it and write the status back last
+       // so that other threads can safely read the pipeline handle.
++      auto t0 = dxvk::high_resolution_clock::now();
+       auto [status, handle] = createOptimizedPipeline(key);
++      auto us = std::chrono::duration_cast<std::chrono::microseconds>(
++        dxvk::high_resolution_clock::now() - t0).count();
++
++      if (us >= 20000)
++        Logger::warn(str::format("AERO-PIPELINE-COMPILE ", us / 1000, " ms",
++          asyncPipelinesEnabled() ? " (async)" : " (sync)"));
+ 
+       entry.first->second.pipeline = handle;
+       entry.first->second.status.store(status);
+@@ -1519,7 +1637,8 @@ namespace dxvk {
+       flags.pNext = std::exchange(info.pNext, &flags);
+ 
+     VkPipeline pipeline = VK_NULL_HANDLE;
+-    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
++    VkResult vr = vk->vkCreateGraphicsPipelines(vk->device(), aeroPipelineCache(vk), 1, &info, nullptr, &pipeline);
++    if (!vr) aeroPipelineCacheSave(vk);
+ 
+     if (vr != VK_SUCCESS) {
+       Logger::err(str::format("DxvkGraphicsPipeline: Failed to compile pipeline: ", vr));

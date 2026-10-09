@@ -31,9 +31,9 @@ AUTO=0
 # file is checked against a known SHA-256 before it is trusted.
 CACHE="${AERO_CACHE:-$HOME/Library/Caches/AeroOnAppleSilicon}"
 
-RUNTIME_TAG="v1.0.0"
+RUNTIME_TAG="v1.1.0"
 RUNTIME_FILE="aero-runtime-macos-arm64.tar.gz"
-RUNTIME_SHA256="499c5a58451c02731d3b320d5d2919247b39f651d602adc5f0b90abea3ddad8e"
+RUNTIME_SHA256="3f515ba34c224f7f939c13d90eb5495f3e15089859a150637643c56b7df5d737"
 RUNTIME_URL="${RUNTIME_URL:-https://github.com/The-Sequence/aero-on-apple-silicon/releases/download/$RUNTIME_TAG/$RUNTIME_FILE}"
 RUNTIME_CACHED="$CACHE/aero-runtime-$RUNTIME_TAG-macos-arm64.tar.gz"
 

@@ -40,6 +40,8 @@ if [ ! -d "qemu-$QEMU_VER" ]; then
     tar xf "qemu-$QEMU_VER.tar.xz"
     say "Applying the vmvga + macOS patch"
     ( cd "qemu-$QEMU_VER" && patch -p1 < "$ROOT/patches/qemu-9.2.2-aero.patch" )
+    say "Applying the shader cache patch (1.1)"
+    ( cd "qemu-$QEMU_VER" && patch -p1 < "$ROOT/patches/qemu-shader-cache.patch" )
 fi
 if [ ! -f "$WORK/qemu-build/build.ninja" ]; then
     mkdir -p "$WORK/qemu-build"
@@ -50,6 +52,13 @@ if [ ! -f "$WORK/qemu-build/build.ninja" ]; then
 fi
 ninja -C "$WORK/qemu-build" qemu-system-x86_64 qemu-img
 cp "$WORK/qemu-build/qemu-system-x86_64" "$WORK/qemu-build/qemu-img" "$RUNTIME/bin/"
+# Some Homebrew setups resolve SDL2 through a non-existent opt/sdl2 prefix;
+# point the binary at sdl2-compat (which provides libSDL2) and re-sign it.
+if otool -L "$RUNTIME/bin/qemu-system-x86_64" | grep -q '/opt/sdl2/lib/'; then
+    install_name_tool -change "$(brew --prefix)/opt/sdl2/lib/libSDL2-2.0.0.dylib" \
+        "$(brew --prefix)/opt/sdl2-compat/lib/libSDL2-2.0.0.dylib" "$RUNTIME/bin/qemu-system-x86_64"
+    codesign --force -s - "$RUNTIME/bin/qemu-system-x86_64"
+fi
 
 # ----------------------------------------------------------------- DXVK
 say "DXVK (macOS / dxvk-native)"
@@ -59,6 +68,8 @@ if [ ! -d "$WORK/dxvk" ]; then
     ( cd "$WORK/dxvk/subprojects/dxbc-spirv" && git checkout "$DXBC_SPIRV_COMMIT" )
     say "Applying the macOS/MoltenVK patches"
     ( cd "$WORK/dxvk" && patch -p1 < "$ROOT/patches/dxvk-macos.patch" )
+    say "Applying the async pipeline + pipeline cache patch (1.1)"
+    ( cd "$WORK/dxvk" && patch -p1 < "$ROOT/patches/dxvk-async-pipelines.patch" )
     ( cd "$WORK/dxvk/subprojects/dxbc-spirv" && patch -p1 < "$ROOT/patches/dxbc-spirv-dref.patch" )
     ( cd "$WORK/dxvk/subprojects/libdisplay-info" && patch -p1 < "$ROOT/patches/libdisplay-info-macos.patch" ) || true
 fi

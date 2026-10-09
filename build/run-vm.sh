@@ -35,10 +35,11 @@ export DXVK_LOG_PATH="${DXVK_LOG_PATH:-$ROOT/logs}"
 QEMU_DATA="${QEMU_DATA:-$ROOT/runtime/share/qemu}"
 
 MEM="${MEM:-4096}"
-VM_CPUS="${VM_CPUS:-4}"          # 1 socket x N cores (Windows client editions
-                                 # only use 2 sockets)
+VM_CPUS="${VM_CPUS:-3}"          # 1 socket x N cores (Windows client editions
+                                 # only use 2 sockets). 3 balances speed against
+                                 # x86-on-ARM memory-ordering crashes seen at 4.
 TCG_THREAD="${TCG_THREAD:-multi}"  # one host thread per vCPU; =single is safer
-TB_SIZE="${TB_SIZE:-1024}"       # TCG translation cache, MiB
+TB_SIZE="${TB_SIZE:-2048}"       # TCG translation cache, MiB
 CPU_MODEL="${CPU_MODEL:-max}"
 HPET="${HPET:-on}"
 VMVGA_DEBUG="${VMVGA_DEBUG:-off}"
@@ -91,6 +92,20 @@ QMP_SOCK="${QMP_SOCK:-/tmp/aero-$(printf '%s' "$DISK" | md5 | cut -c1-12).sock}"
 #       report UYVY/YUY2/A8B8G8R8 when DXVK supports them
 # See TECHNICAL.md for what each one fixes and how it was found.
 # ---------------------------------------------------------------------
+# 1.1 freeze fixes (each can be set to 0 to bisect):
+#   VMVGA_SHADER_CACHE     identical re-defined guest shaders are created once
+#   DXVK_ASYNC_PIPELINES   Metal pipelines compile on worker threads; a draw
+#                          waits up to DXVK_ASYNC_WAIT_MS before being skipped
+#   DXVK_PIPELINE_CACHE_FILE  compiled pipelines persist across boots
+#   DXVK_CONFIG            caps DXVK's compiler threads so they cannot starve
+#                          the emulated CPUs at login
+export VMVGA_SHADER_CACHE="${VMVGA_SHADER_CACHE:-1}"
+export DXVK_ASYNC_PIPELINES="${DXVK_ASYNC_PIPELINES:-1}"
+export DXVK_ASYNC_WAIT_MS="${DXVK_ASYNC_WAIT_MS:-150}"
+mkdir -p "$VM_DIR"
+export DXVK_PIPELINE_CACHE_FILE="${DXVK_PIPELINE_CACHE_FILE:-$VM_DIR/$GUEST-pipelines.cache}"
+export DXVK_CONFIG="${DXVK_CONFIG:-dxvk.numCompilerThreads = 3}"
+
 if [ "${EXPERIMENTAL_OFF:-0}" != "1" ]; then
     export DXVK_CHUNK_FREE_GRACE="${DXVK_CHUNK_FREE_GRACE:-1}"
     export DXVK_MVK_COMPLETION_FENCE="${DXVK_MVK_COMPLETION_FENCE:-1}"
