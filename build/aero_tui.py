@@ -1618,7 +1618,44 @@ class App:
                 return
         if not self.preflight(vm):
             return
+        vm = self.offer_faster(vm)
         self.start_and_watch(vm, "run")
+
+    def offer_faster(self, vm):
+        """Once per VM: offer the faster settings found in October 2026 (one vCPU
+        per performance core, 6 GB RAM, AHCI disk). -> the (re-read) VM"""
+        conf = vm["_conf"]
+        if vm.get("FASTER_OFFERED") == "1":
+            return vm
+        want_cores = min(8, mac_cores())
+        want_mem = 6144 if mac_mem_mb() >= 16384 else 0
+        cores = int(re.sub(r"\D", "", vm.get("VM_CPUS", "4")) or 4)
+        mem = int(re.sub(r"\D", "", vm.get("MEM", "4096")) or 4096)
+        changes = []
+        if cores < want_cores:
+            changes.append("CPU cores: %d -> %d (about 75%% faster on multi-core work)" % (cores, want_cores))
+        if want_mem and mem < want_mem:
+            changes.append("Memory: %d MB -> %d MB" % (mem, want_mem))
+        ahci = vm.get("DISK_BUS", "ide") != "ahci"
+        if not changes and not ahci:
+            conf_set(conf, "FASTER_OFFERED", "1")
+            return vm
+        text = "Faster settings are available for %s:\n\n" % vm.get("VM_NAME", "this VM")
+        text += "\n".join("  - " + c for c in changes) if changes else "  (cores and memory are already fine)"
+        if ahci:
+            text += ("\n\nAlso: a much faster disk (AHCI). Start the VM, use Machine > Insert guest tools disc, run the new "
+                     "SETUP.CMD once, shut down, then choose Disk controller: AHCI in Settings.")
+        buttons = ("&Apply and start", "&Not now", "&Don't ask again") if changes else ("&OK", "&Don't ask again")
+        b = self.msg("Make it faster?", text, buttons, default=0, width=72)
+        if b == "Apply and start":
+            if cores < want_cores:
+                conf_set(conf, "VM_CPUS", str(want_cores))
+            if want_mem and mem < want_mem:
+                conf_set(conf, "MEM", str(want_mem))
+            conf_set(conf, "FASTER_OFFERED", "1")
+        elif b == "Don't ask again" or (b == "OK"):
+            conf_set(conf, "FASTER_OFFERED", "1")
+        return dict(conf_read(conf), _conf=conf)
 
     def preflight(self, vm):
         """Checks before any VM start."""
