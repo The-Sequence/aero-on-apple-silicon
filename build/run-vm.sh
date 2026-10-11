@@ -152,6 +152,12 @@ else
     DISK_ARGS=( -drive "file=$DISK,format=qcow2,if=ide" )
 fi
 
+# SDL draws the VM window with OpenGL, not Metal: Metal's -[CAMetalLayer
+# nextDrawable] blocks QEMU's main thread for up to ~1 s per call when macOS
+# has no free drawable (window occluded, resizing, boot), which stopped the
+# emulated timers and froze Windows (measured stalls of 2.8 s -> 0.14 s).
+export SDL_RENDER_DRIVER="${SDL_RENDER_DRIVER:-opengl}"
+
 args=()
 [ -d "$QEMU_DATA" ] && args+=( -L "$QEMU_DATA" )
 args+=(

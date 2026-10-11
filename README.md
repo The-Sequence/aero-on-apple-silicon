@@ -26,6 +26,7 @@ The x86 CPU is still emulated (QEMU TCG), because Apple Silicon cannot virtualiz
 
 ## What doesn't, yet
 
+- **Fixed in 1.3: periodic freezes / beach ball** (CPU use dropping to ~5%, then catching up). The VM window was drawn with Metal, and macOS could block QEMU's main thread for seconds waiting for a frame buffer, which stopped Windows' timers. It now draws with OpenGL; the longest stall during boot went from 2.8 s to 0.14 s.
 - **Big windows are slower.** Every frame is copied back from the Mac's GPU, and the cost grows with the window size; a smaller VM window is smoother. (The full-screen freezes and black screens of 1.0/1.1 were caused by too little video memory and are fixed in 1.2.) If it ever locks up, **Force stop** it from the control screen and start it again.
 - **Video in Windows Media Player can stay black in a window** while it plays fine full screen. Under investigation.
 - **CPU-heavy things are slow**, because x86 is emulated. 3DMark06 runs at roughly 9–27 fps, and QEMU's command processing is the current bottleneck, not the GPU.

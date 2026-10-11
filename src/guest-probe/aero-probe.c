@@ -249,6 +249,82 @@ static void WINAPI on_event(PEVENT_RECORD ev)
         count_event(key);
 }
 
+
+/* ------------------------------------------------------------ wait chains
+ * "aero-probe.exe waits <name.exe>": for every thread of that process, ask
+ * Windows' Wait Chain Traversal what it is blocked on and who owns it. */
+#include <wct.h>
+#ifndef WCT_MAX_NODE_COUNT
+#define WCT_MAX_NODE_COUNT 16
+#endif
+#ifndef WCTP_GETINFO_ALL_FLAGS
+#define WCTP_GETINFO_ALL_FLAGS 0x7 /* out-of-proc, COM, critical sections */
+#endif
+#include <tlhelp32.h>
+
+static const char *wct_type(WCT_OBJECT_TYPE t)
+{
+    switch (t) {
+    case WctCriticalSectionType: return "CriticalSection";
+    case WctSendMessageType:     return "SendMessage";
+    case WctMutexType:           return "Mutex";
+    case WctAlpcType:            return "ALPC";
+    case WctComType:             return "COM";
+    case WctThreadWaitType:      return "ThreadWait";
+    case WctProcessWaitType:     return "ProcessWait";
+    case WctThreadType:          return "Thread";
+    case WctComActivationType:   return "ComActivation";
+    case WctUnknownType:         return "Unknown";
+    default:                     return "?";
+    }
+}
+
+static int dump_waits(const WCHAR *exe)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS | TH32CS_SNAPTHREAD, 0);
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    THREADENTRY32 te = { sizeof(te) };
+    HWCT wct = OpenThreadWaitChainSession(0, NULL);
+    DWORD pids[16]; int npids = 0, i;
+
+    if (snap == INVALID_HANDLE_VALUE || !wct) { out("waits: cannot open snapshot/WCT (%lu)", GetLastError()); return 1; }
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe))
+        if (!_wcsicmp(pe.szExeFile, exe) && npids < 16) pids[npids++] = pe.th32ProcessID;
+    if (!npids) { out("waits: %ls is not running", exe); return 1; }
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+        for (i = 0; i < npids; i++) if (te.th32OwnerProcessID == pids[i]) break;
+        if (i == npids) continue;
+        WAITCHAIN_NODE_INFO nodes[WCT_MAX_NODE_COUNT];
+        DWORD count = WCT_MAX_NODE_COUNT; BOOL cycle = FALSE;
+        if (!GetThreadWaitChain(wct, 0, WCTP_GETINFO_ALL_FLAGS, te.th32ThreadID, &count, nodes, &cycle)) {
+            out("waits: pid %lu tid %lu: error %lu", te.th32OwnerProcessID, te.th32ThreadID, GetLastError());
+            continue;
+        }
+        char line[520]; size_t n = 0; DWORD k;
+        n += _snprintf(line + n, sizeof(line) - n, "waits: pid %lu tid %lu%s:", te.th32OwnerProcessID,
+                       te.th32ThreadID, cycle ? " DEADLOCK" : "");
+        for (k = 0; k < count && n < sizeof(line) - 80; k++) {
+            WAITCHAIN_NODE_INFO *nd = &nodes[k];
+            if (nd->ObjectType == WctThreadType) {
+                n += _snprintf(line + n, sizeof(line) - n, " -> thread %lu(pid %lu,%s,wait %lums)",
+                               nd->ThreadObject.ThreadId, nd->ThreadObject.ProcessId,
+                               nd->ObjectStatus == WctStatusBlocked ? "blocked" :
+                               nd->ObjectStatus == WctStatusRunning ? "running" : "other",
+                               nd->ThreadObject.WaitTime);
+            } else {
+                char nm[80]; wtoa(nd->LockObject.ObjectName, nm, sizeof(nm));
+                n += _snprintf(line + n, sizeof(line) - n, " -> %s%s%s", wct_type(nd->ObjectType),
+                               nm[0] ? " " : "", nm);
+            }
+        }
+        line[sizeof(line) - 1] = 0;
+        out("%s", line);
+    }
+    CloseThreadWaitChainSession(wct);
+    CloseHandle(snap);
+    return 0;
+}
+
 /* ------------------------------------------------------------ sessions */
 static TRACEHANDLE start_session(const WCHAR *name, ULONG enable_flags, int kernel)
 {
@@ -311,7 +387,7 @@ static DWORD WINAPI consume_thread(LPVOID arg)
     return 0;
 }
 
-int wmain(void)
+int wmain(int argc, WCHAR **argv)
 {
     static consume_arg k = { KERNEL_LOGGER_NAMEW }, a = { L"AeroProbe" };
     TRACEHANDLE ks, as;
@@ -320,6 +396,8 @@ int wmain(void)
     InitializeCriticalSection(&g_send_lock);
     InitializeCriticalSection(&g_count_lock);
     g_file = _wfopen(L"C:\\aero-probe.log", L"a");
+    if (argc >= 3 && !_wcsicmp(argv[1], L"waits"))
+        return dump_waits(argv[2]);
     out("start v3");
 
     ks = start_session(KERNEL_LOGGER_NAMEW, EVENT_TRACE_FLAG_IMAGE_LOAD | EVENT_TRACE_FLAG_PROCESS, 1);
