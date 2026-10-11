@@ -142,6 +142,16 @@ if [ ! -f "$DISK" ]; then
     "$QEMU_IMG" create -f qcow2 "$DISK" "$DISK_SIZE" >/dev/null
 fi
 
+# DISK_BUS=ahci: Windows Vista/7's in-box AHCI driver (msahci), much faster than
+# IDE. New VMs use it from the start. A VM installed on IDE must first have
+# msahci enabled (SETUP.CMD does this), otherwise it stops with 0x7B at boot.
+if [ "${DISK_BUS:-ide}" = ahci ]; then
+    DISK_ARGS=( -device ahci,id=ahci0 -drive "file=$DISK,format=qcow2,if=none,id=hd0,cache=writeback"
+                -device ide-hd,drive=hd0,bus=ahci0.0,bootindex=0 )
+else
+    DISK_ARGS=( -drive "file=$DISK,format=qcow2,if=ide" )
+fi
+
 args=()
 [ -d "$QEMU_DATA" ] && args+=( -L "$QEMU_DATA" )
 args+=(
@@ -157,9 +167,8 @@ args+=(
     # -display sdl is required: the 3D path presents through QEMU's SDL window.
     -display "sdl,window-close=$WINDOW_CLOSE"
     -vga none
-    -device "vmvga,vgpu=$VGPU_GENERATION,debug=$VMVGA_DEBUG,vgamem_mb=${VRAM_MB:-256}"
-    # if=ide: neither Vista nor 7 has an in-box AHCI or virtio disk driver.
-    -drive "file=$DISK,format=qcow2,if=ide"
+    -device "vmvga,vgpu=$VGPU_GENERATION,debug=$VMVGA_DEBUG,vgamem_mb=${VRAM_MB:-512}"
+    "${DISK_ARGS[@]}"
     -netdev user,id=net0
     -device "$NIC,netdev=net0"
     -qmp "unix:$QMP_SOCK,server=on,wait=off"

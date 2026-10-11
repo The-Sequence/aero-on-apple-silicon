@@ -67,6 +67,10 @@ set "K=HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
 reg add "%K%" /v TdrDelay /t REG_DWORD /d 60 /f >>"%LOG%" 2>&1
 reg add "%K%" /v TdrDdiDelay /t REG_DWORD /d 60 /f >>"%LOG%" 2>&1
 echo   Set to 60 seconds.
+rem Windows' in-box AHCI disk driver starts at boot from now on, so the VM can
+rem be switched from the slow IDE controller to AHCI in the Settings screen.
+reg add "HKLM\SYSTEM\CurrentControlSet\services\msahci" /v Start /t REG_DWORD /d 0 /f >>"%LOG%" 2>&1
+echo   AHCI disk driver enabled (switch the disk to AHCI in Settings for speed).
 
 rem ---- 3. auto-resize agent ----------------------------------------------
 echo.

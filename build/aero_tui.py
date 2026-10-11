@@ -267,6 +267,8 @@ def vm_env(vm, mode):
         "QMP_SOCK": qmp_sock(vm.get("DISK", "")),
         "AUDIO_DEVICE": vm.get("AUDIO_DEVICE", "usb" if guest == "vista" else "hda"),
         "NIC": vm.get("NIC", "e1000"), "CLIPBOARD": vm.get("CLIPBOARD", "on"),
+        # VMs made before AHCI support have no DISK_BUS and stay on IDE.
+        "DISK_BUS": vm.get("DISK_BUS", "ide"),
     }
     return env, log
 
@@ -2261,7 +2263,7 @@ class App:
             conf_write(conf, {"VM_NAME": name, "GUEST": guest,
                               "DISK": os.path.join(VMS, s + ".qcow2"), "DISK_SIZE": size + "G",
                               "VM_CPUS": cores, "MEM": mem, "STAGE": "new",
-                              "AUDIO_DEVICE": "usb" if guest == "vista" else "hda", "NIC": "e1000",
+                              "AUDIO_DEVICE": "usb" if guest == "vista" else "hda", "NIC": "e1000", "DISK_BUS": "ahci",
                               "CLIPBOARD": "on"})
             self.refresh_state()
             for i, vm in enumerate(self.vms):
@@ -2283,6 +2285,7 @@ class App:
         guest = vm.get("GUEST", "win7")
         audio = vm.get("AUDIO_DEVICE", "usb" if guest == "vista" else "hda")
         nic = vm.get("NIC", "e1000")
+        bus = vm.get("DISK_BUS", "ide")
         b, v = self.form("Settings for %s" % name, [
             ("input", "cores", "CPU cores (1-%d, 4 recommended):" % total_cores, vm.get("VM_CPUS", "4")),
             ("input", "mem", "Memory in MB (1024-%d):" % (total_mem - 4096), vm.get("MEM", "4096")),
@@ -2292,6 +2295,8 @@ class App:
              {"hda": 0, "usb": 1, "none": 2}.get(audio, 0)),
             ("text", "Network card:"),
             ("radio", "nic", ["Intel PRO/1000 (recommended)", "Realtek RTL8139"], 0 if nic == "e1000" else 1),
+            ("text", "Disk controller:"),
+            ("radio", "bus", ["AHCI (faster)", "IDE (older VMs)"], 0 if bus == "ahci" else 1),
             ("check", "clip", "Clipboard sharing with the Mac", vm.get("CLIPBOARD", "on") == "on"),
         ], ("&Save", "Cancel"), width=66)
         if b != "Save":
@@ -2313,6 +2318,15 @@ class App:
         conf_set(conf, "DISK_SIZE", size + "G")
         conf_set(conf, "AUDIO_DEVICE", ["hda", "usb", "none"][v["audio"]])
         conf_set(conf, "NIC", ["e1000", "rtl8139"][v["nic"]])
+        new_bus = ["ahci", "ide"][v["bus"]]
+        if new_bus == "ahci" and bus != "ahci" and vm.get("STAGE", "new") != "new":
+            if self.msg("Switch to AHCI?", "Windows must have its AHCI driver turned on first, or it will not "
+                        "start (blue screen 0x7B). The SETUP.CMD on the current tools disc does this. Only "
+                        "switch if you have run that SETUP.CMD in this VM since updating. If Windows does not "
+                        "start, come back here and pick IDE again.", ("&Cancel", "&Switch"),
+                        default=0, width=70) != "Switch":
+                new_bus = bus
+        conf_set(conf, "DISK_BUS", new_bus)
         conf_set(conf, "CLIPBOARD", "on" if v["clip"] else "off")
         note = ""
         if int(size) > cur_gb and os.path.isfile(disk):

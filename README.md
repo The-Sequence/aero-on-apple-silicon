@@ -80,6 +80,7 @@ For the best current performance, use a smaller VM window, keep the default mult
 ## Troubleshooting QEMU Windows Guest VM GPU Performance
 
 - **Do not install VMware Tools in the guest.** It makes the login screen crawl. `SETUP.CMD` installs only what is needed: the display driver, clipboard sharing, the resize and status helper, and two registry fixes.
+- **Fast disk (AHCI).** New VMs use Windows' built-in AHCI disk controller, which is much faster than the old IDE one. For a VM created before this, run the new `SETUP.CMD` from the tools disc once, shut down, then pick *Disk controller: AHCI* in Settings.
 - **Use a lower resolution.** The smaller the VM window (and so Windows' resolution), the smoother everything runs: every frame is copied back from the Mac's GPU, and that cost grows with the pixel count. Something like 1280×800 is far less choppy than full screen on a big display. Just resize the VM window; Windows follows it.
 - **If the VM freezes** and doesn't recover within a minute, open the control screen (or the Desktop launcher) and use **Force stop**, then start it again. Windows may run a quick disk check on the next boot; that is normal.
 - **Nothing is downloaded twice.** Downloads are kept in `~/Library/Caches/AeroOnAppleSilicon`, checked by SHA-256, and reused even if you delete or re-clone the folder. If `VMware-tools-windows-10.3.10-12406962.iso` is already in your Downloads or on your Desktop, setup uses it. Interrupted downloads resume.
