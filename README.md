@@ -20,13 +20,13 @@ The x86 CPU is still emulated (QEMU TCG), because Apple Silicon cannot virtualiz
 - **Windows shows your Mac's GPU name** (for example "Apple M4 Pro") in Device Manager and dxdiag. That name is a label our setup writes; the rendering really does happen on the Mac GPU.
 - **The Windows Experience Index (WinSAT) assessment completes.** Windows 7: 6.0 for both Aero desktop performance and 3D gaming graphics (base 6.0). Windows Vista: 5.9 for both (base 5.2, held down by the emulated processor).
 - **Resizing works like VMware Tools, without VMware Tools.** Windows switches to the exact size of the Mac window, full screen included, and the picture stays sharp on a Retina display.
-- **Windows Media Center runs full screen**, and audio plays at the correct speed.
+- **Windows Media Center runs full screen** (menus, photo slideshows and HD video), and audio plays at the correct speed.
 - **Copy and paste between the Mac and Windows** (clipboard sharing through SPICE).
-- **Multi-core guests** (multi-threaded TCG).
+- **Multi-core guests** (multi-threaded TCG): one virtual CPU per performance core. Windows Experience Index 5.9 on an M4 Pro (processor 6.3, memory 7.9, disk 7.9).
 
 ## What doesn't, yet
 
-- **Freezes, especially at high resolutions.** Every frame is copied back from the Mac's GPU, and the cost grows with the window size. A lower resolution (a smaller VM window) is noticeably smoother and hangs far less. If it does lock up, **Force stop** it from the control screen and start it again.
+- **Big windows are slower.** Every frame is copied back from the Mac's GPU, and the cost grows with the window size; a smaller VM window is smoother. (The full-screen freezes and black screens of 1.0/1.1 were caused by too little video memory and are fixed in 1.2.) If it ever locks up, **Force stop** it from the control screen and start it again.
 - **Video in Windows Media Player can stay black in a window** while it plays fine full screen. Under investigation.
 - **CPU-heavy things are slow**, because x86 is emulated. 3DMark06 runs at roughly 9–27 fps, and QEMU's command processing is the current bottleneck, not the GPU.
 - **3DMark06 can still fail** with `D3DERR_DEVICELOST` in some runs.
@@ -71,11 +71,26 @@ Then open the folder and **double-click `START HERE.command`**. That is the whol
 
 You never need a second Terminal window. VMs run in the background, the VM window's close button is disabled so an install can't be cut off by accident, and your Mac is kept awake while a VM runs. If the control screen can't run in your Terminal, it falls back to a plain step-by-step wizard (`./START\ HERE.command --plain` forces it).
 
+## Upgrading to the newest version
+
+Your VMs, settings and downloads are kept; only the project's scripts change.
+
+1. **Shut down any running VM** from Windows' Start menu.
+2. **Get the new version:**
+   - If you used `git clone`: open Terminal in the project folder and run `git pull`.
+   - If you downloaded a zip: download the new one from the [releases page](https://github.com/The-Sequence/aero-on-apple-silicon/releases), unzip it, and move your `vms` folder (and any `*.conf` files in it) into the new folder.
+3. **Open `START HERE.command`.** It updates the tools and rebuilds the guest tools disc automatically; nothing is downloaded twice.
+4. **Start your VM.** The first time, it offers the faster settings for older VMs (more CPU cores and memory) — choose *Apply and start*.
+5. **Optional, for a much faster disk (AHCI):** with the VM running, use *Machine → Insert guest tools disc*, open the disc in Windows and run `SETUP.CMD` once. Shut down, then in *Settings* choose *Disk controller: AHCI*. If Windows ever fails to start after this, switch it back to IDE in Settings.
+6. **Optional:** in Windows, open *Control Panel → Performance Information and Tools → Re-run the assessment* so the score reflects the new speed. Do it once Windows has finished starting up; the first boot after an upgrade is busy.
+
+New VMs created after upgrading get all of this automatically.
+
 ## Accelerating 3D Graphics in Windows Guest VMs on macOS
 
 This project accelerates the guest's D3D9 graphics by translating VMware SVGA3D commands through DXVK and MoltenVK to Metal on the Mac GPU. It does not accelerate the x86 guest CPU: QEMU TCG still emulates that CPU on Apple Silicon. For the rendering architecture, measured bottlenecks and individual compatibility fixes, see [TECHNICAL.md](TECHNICAL.md).
 
-For the best current performance, use a smaller VM window, keep the default multi-threaded TCG setting, and avoid CPU-heavy workloads. Aero, older D3D9 applications and older games benefit most; DirectX 10 and 11 are not supported yet.
+For the best current performance, use one CPU core per Mac performance core (the default for new VMs), the AHCI disk, and a moderate window size. Aero, older D3D9 applications and older games benefit most; DirectX 10 and 11 are not supported yet.
 
 ## Troubleshooting QEMU Windows Guest VM GPU Performance
 
