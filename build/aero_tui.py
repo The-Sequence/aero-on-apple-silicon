@@ -44,7 +44,8 @@ GB = 1024 ** 3
 PLAIN = 3                # exit code: use the plain wizard instead
 MIN_H, MIN_W = 24, 80
 MIN_DISK_GB = 30         # Windows 7 x64 + updates + page file + hibernation file
-MAX_SAFE_CORES = 4       # more vCPUs barely speed up TCG and make installs flakier
+MAX_SAFE_CORES = 8       # measured: 4 -> 8 vCPUs is +73-84% multi-core (WinSAT); beyond the
+                         # Mac's performance cores, threads land on slower efficiency cores
 
 STAGES = ["new", "installed", "check", "ready"]
 STAGE_TEXT = {"new": "not installed", "installed": "needs drivers", "check": "needs checks",
@@ -2208,14 +2209,14 @@ class App:
     # -- other actions -------------------------------------------------------------------
     def act_new(self):
         total_cores, total_mem = mac_cores(), mac_mem_mb()
-        vals = {"guest": 0, "name": "Windows 7", "size": "40", "cores": str(min(4, total_cores)),
-                "mem": "4096" if total_mem >= 16384 else "2048"}
+        vals = {"guest": 0, "name": "Windows 7", "size": "40", "cores": str(min(8, total_cores)),
+                "mem": "6144" if total_mem >= 16384 else "2048"}
         while True:
             b, v = self.form("New VM", [
                 ("radio", "guest", ["Windows 7", "Windows Vista"], vals["guest"]),
                 ("input", "name", "Name:", vals["name"]),
                 ("input", "size", "Disk size in GB (it only uses what it needs, 40 recommended):", vals["size"]),
-                ("input", "cores", "CPU cores (this Mac has %d fast cores, 4 recommended):" % total_cores, vals["cores"]),
+                ("input", "cores", "CPU cores (this Mac has %d fast cores; that many is fastest):" % total_cores, vals["cores"]),
                 ("input", "mem", "Memory in MB (this Mac has %d MB):" % total_mem, vals["mem"]),
             ], ("&Create", "Cancel"), width=70)
             if b != "Create":
@@ -2253,8 +2254,8 @@ class App:
                 self.msg("Please check", "\n".join(problems))
                 continue
             if int(cores) > MAX_SAFE_CORES and self.msg(
-                    "Many cores", "%s cores is more than this setup has been tested with. Under emulation, more "
-                    "than %d cores barely speeds Windows up and makes the installer more likely to fail. Use %d?"
+                    "Many cores", "%s cores is more than this setup has been tested with. More than %d cores "
+                    "puts emulated CPUs on the Mac's slower efficiency cores, so it rarely helps. Use %d?"
                     % (cores, MAX_SAFE_CORES, MAX_SAFE_CORES),
                     ("&Use %d" % MAX_SAFE_CORES, "&Keep %s" % cores)) != "Keep %s" % cores:
                 cores = str(MAX_SAFE_CORES)
@@ -2287,7 +2288,7 @@ class App:
         nic = vm.get("NIC", "e1000")
         bus = vm.get("DISK_BUS", "ide")
         b, v = self.form("Settings for %s" % name, [
-            ("input", "cores", "CPU cores (1-%d, 4 recommended):" % total_cores, vm.get("VM_CPUS", "4")),
+            ("input", "cores", "CPU cores (1-%d; %d is fastest):" % (total_cores, total_cores), vm.get("VM_CPUS", "4")),
             ("input", "mem", "Memory in MB (1024-%d):" % (total_mem - 4096), vm.get("MEM", "4096")),
             ("input", "size", "Disk size in GB (can only grow, now %d):" % cur_gb, str(cur_gb)),
             ("text", "Sound device:"),
