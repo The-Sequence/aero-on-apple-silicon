@@ -157,7 +157,7 @@ args+=(
     # -display sdl is required: the 3D path presents through QEMU's SDL window.
     -display "sdl,window-close=$WINDOW_CLOSE"
     -vga none
-    -device "vmvga,vgpu=$VGPU_GENERATION,debug=$VMVGA_DEBUG"
+    -device "vmvga,vgpu=$VGPU_GENERATION,debug=$VMVGA_DEBUG,vgamem_mb=${VRAM_MB:-256}"
     # if=ide: neither Vista nor 7 has an in-box AHCI or virtio disk driver.
     -drive "file=$DISK,format=qcow2,if=ide"
     -netdev user,id=net0
